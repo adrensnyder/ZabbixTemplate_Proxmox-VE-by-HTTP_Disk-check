@@ -1,0 +1,407 @@
+zabbix_export:
+  version: '6.0'
+  date: '2025-05-23T12:16:06Z'
+  groups:
+    - uuid: de1143f089864e559c7816947bcdb5d5
+      name: "Templates - \t0_CST_TPL"
+  templates:
+    - uuid: 75543935a6a24ee492c8bf967ba3a7a5
+      template: '0_CST_TPL-Proxmox VE by HTTP - Disk check'
+      name: '0_CST_TPL-Proxmox VE by HTTP - Disk check'
+      description: |
+        Add SNMP interface with the ip of the Proxmox node
+        
+        Edit macro {$PVE.HOSTNAME} with the hostname of the node
+        
+        Create group "zabbix" in Permissions - Groups
+        Create user "zabbix" with group "Zabbix" in Permissions - Users
+        
+        Create an API token for user "zabbix@xxx" with token id "zabbix"
+        Please copy the TokenID and Secret separately as they will not be displayed afterwards
+        
+        Create a new role in Roles named "Zabbix" with:
+        Datastore.Audit
+        Pool.Audit
+        SDN.Audit
+        Sys.Audit
+        VM.Audit
+        
+        Add User/Group/Api permission in Permissions with:
+        Path: /
+        User: [The zabbix User/Group/Api]
+        Role: Zabbix
+        
+        Note: All the 3 permissions are needed to get the template working
+        
+        In the Zabbix Host modify the Macro {$PVE.TOKEN.ID} and {$PVE.TOKEN.SECRET} with the values we saved before
+        
+        There credentials are shared across all the nodes. Need to be created only one time for all of them
+      groups:
+        - name: "Templates - \t0_CST_TPL"
+      items:
+        - uuid: 6b2b9fb28d64405db05d1fc780c7837f
+          name: 'Proxmox: Get ceph status'
+          type: HTTP_AGENT
+          key: proxmox.ceph.status
+          delay: 1h
+          trends: '0'
+          value_type: TEXT
+          description: 'Get ceph status information'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data.health.status
+          url: 'https://{HOST.CONN}:{$PVE.URL.PORT}/api2/json/cluster/ceph/status'
+          status_codes: '200,500'
+          headers:
+            - name: Authorization
+              value: 'PVEAPIToken={$PVE.TOKEN.ID}={$PVE.TOKEN.SECRET}'
+          triggers:
+            - uuid: 74349b075bbc43b1b8b1a8260bdd9529
+              expression: 'find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status,,"regexp","HEALTH_OK")=0'
+              name: 'Proxmox: Ceph status {ITEM.VALUE}'
+              priority: DISASTER
+        - uuid: bb690766b0cc43548d34411c4a1e452f
+          name: 'Proxmox: Get ceph status (Check item)'
+          type: HTTP_AGENT
+          key: proxmox.ceph.status.checkitem
+          delay: 1h
+          trends: '0'
+          value_type: TEXT
+          description: 'Retrieve the existance of CEPH. Useful to avoid fake errors when isn''t exist'
+          preprocessing:
+            - type: CHECK_JSON_ERROR
+              parameters:
+                - $.data.health.status
+            - type: JSONPATH
+              parameters:
+                - $.data
+          url: 'https://{HOST.CONN}:{$PVE.URL.PORT}/api2/json/cluster/ceph/status'
+          status_codes: '200,500'
+          headers:
+            - name: Authorization
+              value: 'PVEAPIToken={$PVE.TOKEN.ID}={$PVE.TOKEN.SECRET}'
+        - uuid: 8795767e2c504edfad03e1d3ba351c98
+          name: 'Proxmox: Smart Api Error'
+          type: DEPENDENT
+          key: proxmox.smart.api.errors
+          delay: '0'
+          trends: '0'
+          value_type: TEXT
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.APIError
+          master_item:
+            key: proxmox.smart.data
+          triggers:
+            - uuid: 92887877dcea412cb427d579924202c8
+              expression: 'find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.api.errors,,"regexp","Ok")=0'
+              name: 'Proxmox: Smart API error'
+              priority: HIGH
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: d6450492fab64856b91e40b59f785521
+          name: 'Proxmox: Smart - Get data'
+          type: SCRIPT
+          key: proxmox.smart.data
+          delay: 1h
+          history: 7d
+          trends: '0'
+          value_type: TEXT
+          params: |
+            var SmartData = {
+                APIError: "Ok"
+            };
+            
+            var params = JSON.parse(value);
+            var req = new HttpRequest();
+            req.addHeader('Authorization: PVEAPIToken=' + params.token + '=' + params.secret);
+            
+            var smartResult;
+            
+            try {
+                fullUrl = encodeURI('https://' + params.url + ':' + params.port + '/api2/json/nodes/' + params.hostname + '/disks/list');
+                smartResult = retryRequest(fullUrl,params.retry,params.retryms);
+            } catch (error) {
+                SmartData.APIError = "Proxmox API failed. Error: " + error + " (URL: " + fullUrl + ")";
+                return JSON.stringify(SmartData);
+            }
+            
+            try {
+                var data = JSON.parse(smartResult).data;
+            } catch (error) {
+                SmartData.APIError = "Proxmox API failed. Error: " + error;
+                return JSON.stringify(SmartData);
+            }
+            
+            var result = {
+                APIError: "Ok",
+                data: data
+            };
+            
+            return JSON.stringify(result);
+            
+            function retryRequest(url, retries, delay) {
+                while (retries >= 0) {
+                    try {
+                        return req.get(encodeURI(url));
+                    } catch (error) {
+                        if (retries === 0) {
+                            throw error;
+                        }
+                        retries--;
+            
+                        var start = Date.now();
+                        while (Date.now() - start < delay) {
+                            // Empty cycle. Waiting
+                        }
+                    }
+                }
+            }
+          description: 'Get Smart Data'
+          timeout: 30s
+          parameters:
+            - name: hostname
+              value: '{$PVE.HOSTNAME}'
+            - name: port
+              value: '{$PVE.URL.PORT}'
+            - name: retry
+              value: '{$PROXMOX.REQ.RETRY}'
+            - name: retryms
+              value: '{$PROXMOX.REQ.RETRY.MS}'
+            - name: secret
+              value: '{$PVE.TOKEN.SECRET}'
+            - name: token
+              value: '{$PVE.TOKEN.ID}'
+            - name: url
+              value: '{HOST.CONN}'
+          tags:
+            - tag: component
+              value: system
+      discovery_rules:
+        - uuid: bd0996ef207b4879a37c61929b9491c1
+          name: 'Smart discovery'
+          type: DEPENDENT
+          key: proxmox.smart.discovery
+          delay: '0'
+          item_prototypes:
+            - uuid: 6da0cc73c8b542ab9da6532288e8c499
+              name: 'Proxmox: Smart [{#SMART.DEVPATH}]: By Id Link'
+              type: DEPENDENT
+              key: 'proxmox.smart.byidlink[{#SMART.DEVPATH}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.devpath == "{#SMART.DEVPATH}")].by_id_link.first()'
+              master_item:
+                key: proxmox.smart.data
+            - uuid: 57070dfbac3b4fc89121f11141982239
+              name: 'Proxmox: Smart [{#SMART.DEVPATH}]: Health'
+              type: DEPENDENT
+              key: 'proxmox.smart.health[{#SMART.DEVPATH}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.devpath == "{#SMART.DEVPATH}")].health.first()'
+              master_item:
+                key: proxmox.smart.data
+              trigger_prototypes:
+                - uuid: 28ae91fec94b47c681f3e1a2ba3165a0
+                  expression: |
+                    find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.health[{#SMART.DEVPATH}],,"iregexp","OK")=0 and
+                    find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.health[{#SMART.DEVPATH}],,"iregexp","PASSED")=0 and
+                    find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.health[{#SMART.DEVPATH}],,"iregexp","UNKNOWN")=0
+                  name: 'Proxmox: Smart [{#SMART.DEVPATH}] Status ({ITEM.LASTVALUE})'
+                  priority: DISASTER
+                - uuid: 62c03a1db56f44bba49bfdafafe1e234
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.health[{#SMART.DEVPATH}],{$PROXMOX.NODATA01})=1'
+                  name: 'Proxmox: Smart [{#SMART.DEVPATH}] Status - Not updated'
+                  priority: WARNING
+                  dependencies:
+                    - name: 'Proxmox: Smart [{#SMART.DEVPATH}] Status - Not updated'
+                      expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.health[{#SMART.DEVPATH}],{$PROXMOX.NODATA02})=1'
+                - uuid: 9d8a5885cc3f4e4f9a689c7c24b5b071
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.health[{#SMART.DEVPATH}],{$PROXMOX.NODATA02})=1'
+                  name: 'Proxmox: Smart [{#SMART.DEVPATH}] Status - Not updated'
+                  priority: AVERAGE
+                  dependencies:
+                    - name: 'Proxmox: Smart [{#SMART.DEVPATH}] Status - Not updated'
+                      expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.health[{#SMART.DEVPATH}],{$PROXMOX.NODATA03})=1'
+                - uuid: d779a476418e4326a6b8e4a03ed8e347
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.health[{#SMART.DEVPATH}],{$PROXMOX.NODATA03})=1'
+                  name: 'Proxmox: Smart [{#SMART.DEVPATH}] Status - Not updated'
+                  priority: HIGH
+                  dependencies:
+                    - name: 'Proxmox: Smart [{#SMART.DEVPATH}] Status - Not updated'
+                      expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.health[{#SMART.DEVPATH}],{$PROXMOX.NODATA04})=1'
+                - uuid: 281031545b5c40569e2753349f880428
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.health[{#SMART.DEVPATH}],{$PROXMOX.NODATA04})=1'
+                  name: 'Proxmox: Smart [{#SMART.DEVPATH}] Status - Not updated'
+                  priority: DISASTER
+                - uuid: 741adbe070b2420d852c70088cc1e33c
+                  expression: 'find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.smart.health[{#SMART.DEVPATH}],,"iregexp","UNKNOWN")=1'
+                  name: 'Proxmox: Smart [{#SMART.DEVPATH}] Status UNKNOWN'
+                  priority: WARNING
+            - uuid: 7b44265bb5d44649bb1d4c481b1f9ab1
+              name: 'Proxmox: Smart [{#SMART.DEVPATH}]: Model'
+              type: DEPENDENT
+              key: 'proxmox.smart.model[{#SMART.DEVPATH}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.devpath == "{#SMART.DEVPATH}")].model.first()'
+              master_item:
+                key: proxmox.smart.data
+            - uuid: 1c0dcc805b90438bafaa37ae62e31e2d
+              name: 'Proxmox: Smart [{#SMART.DEVPATH}]: Size'
+              type: DEPENDENT
+              key: 'proxmox.smart.size[{#SMART.DEVPATH}]'
+              delay: '0'
+              units: G
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.devpath == "{#SMART.DEVPATH}")].size.first()'
+              master_item:
+                key: proxmox.smart.data
+            - uuid: 940e16a749ab426296d4c816efb4e9d2
+              name: 'Proxmox: Smart [{#SMART.DEVPATH}]: Serial Number'
+              type: DEPENDENT
+              key: 'proxmox.smart.sn[{#SMART.DEVPATH}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.devpath == "{#SMART.DEVPATH}")].serial.first()'
+              master_item:
+                key: proxmox.smart.data
+            - uuid: d60596b1939b4dfc9e9df166a9675998
+              name: 'Proxmox: Smart [{#SMART.DEVPATH}]: Type'
+              type: DEPENDENT
+              key: 'proxmox.smart.type[{#SMART.DEVPATH}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.devpath == "{#SMART.DEVPATH}")].type.first()'
+              master_item:
+                key: proxmox.smart.data
+            - uuid: 3ece0374cf374fe4abcdc09369adf798
+              name: 'Proxmox: Smart [{#SMART.DEVPATH}]: Used for'
+              type: DEPENDENT
+              key: 'proxmox.smart.usedfor[{#SMART.DEVPATH}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.devpath == "{#SMART.DEVPATH}")].used.first()'
+              master_item:
+                key: proxmox.smart.data
+            - uuid: 5f8ce50c8028443297cb6537c55fbafa
+              name: 'Proxmox: Smart [{#SMART.DEVPATH}]: Vendor'
+              type: DEPENDENT
+              key: 'proxmox.smart.vendor[{#SMART.DEVPATH}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.devpath == "{#SMART.DEVPATH}")].vendor.first()'
+              master_item:
+                key: proxmox.smart.data
+          master_item:
+            key: proxmox.smart.data
+          lld_macro_paths:
+            - lld_macro: '{#SMART.DEVPATH}'
+              path: $.devpath
+      macros:
+        - macro: '{$PROXMOX.NODATA01}'
+          value: 1d
+          description: 'User for "Not updated" triggers (Low)'
+        - macro: '{$PROXMOX.NODATA02}'
+          value: 2d
+          description: 'User for "Not updated" triggers (Mid)'
+        - macro: '{$PROXMOX.NODATA03}'
+          value: 3d
+          description: 'User for "Not updated" triggers (High)'
+        - macro: '{$PROXMOX.NODATA04}'
+          value: 4d
+          description: 'User for "Not updated" triggers (Disaster)'
+        - macro: '{$PROXMOX.REQ.RETRY}'
+          value: '2'
+          description: 'Maximum retries for web requests'
+        - macro: '{$PROXMOX.REQ.RETRY.MS}'
+          value: '500'
+          description: 'Wait time in ms in retries'
+        - macro: '{$PVE.HOST.URL}'
+          value: 0.0.0.0
+          description: 'IP or FQDN of the host'
+        - macro: '{$PVE.HOSTNAME}'
+          description: 'Hostname in proxmox'
+        - macro: '{$PVE.TOKEN.ID}'
+          value: USER@REALM!TOKENID
+          description: 'API tokens allow stateless access to most parts of the REST API by another system, software or API client.'
+        - macro: '{$PVE.TOKEN.SECRET}'
+          value: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+          description: 'Secret key.'
+        - macro: '{$PVE.URL.PORT}'
+          value: '8006'
+          description: 'The API uses the HTTPS protocol and the server listens to port 8006 by default.'
+  triggers:
+    - uuid: 696e7006721341cda1fffdb85cf9d838
+      expression: |
+        nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status,{$PROXMOX.NODATA01})=1 and 
+        find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status.checkitem,,"regexp","null")=0
+      name: 'Proxmox: Get ceph status - Not updated'
+      priority: WARNING
+      dependencies:
+        - name: 'Proxmox: Get ceph status - Not updated'
+          expression: |
+            nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status,{$PROXMOX.NODATA02})=1 and 
+            find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status.checkitem,,"regexp","null")=0
+    - uuid: 25901c6ada6d4f55a473ea15d2feeee3
+      expression: |
+        nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status,{$PROXMOX.NODATA02})=1 and 
+        find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status.checkitem,,"regexp","null")=0
+      name: 'Proxmox: Get ceph status - Not updated'
+      priority: AVERAGE
+      dependencies:
+        - name: 'Proxmox: Get ceph status - Not updated'
+          expression: |
+            nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status,{$PROXMOX.NODATA03})=1 and 
+            find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status.checkitem,,"regexp","null")=0
+    - uuid: 1fcf3769579e4807a06ae9aac83f1e8a
+      expression: |
+        nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status,{$PROXMOX.NODATA03})=1 and 
+        find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status.checkitem,,"regexp","null")=0
+      name: 'Proxmox: Get ceph status - Not updated'
+      priority: HIGH
+      dependencies:
+        - name: 'Proxmox: Get ceph status - Not updated'
+          expression: |
+            nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status,{$PROXMOX.NODATA04})=1 and 
+            find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status.checkitem,,"regexp","null")=0
+    - uuid: 070673cb82bb461aa90da3e17b4c2350
+      expression: |
+        nodata(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status,{$PROXMOX.NODATA04})=1 and 
+        find(/0_CST_TPL-Proxmox VE by HTTP - Disk check/proxmox.ceph.status.checkitem,,"regexp","null")=0
+      name: 'Proxmox: Get ceph status - Not updated'
+      priority: DISASTER
